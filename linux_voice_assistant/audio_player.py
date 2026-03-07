@@ -1,26 +1,25 @@
-# mpv_player.py
 import logging
 from typing import Callable, List, Optional, Union
 
-from .player.libmpv import LibMpvPlayer
+from .player.alsaplayer import AlsaPlayer
 from .player.state import PlayerState
 
 
-class MpvMediaPlayer:
+class AudioPlayer:
     """
-    Linux Voice Assistant MediaPlayer implementation based on libmpv.
+    Linux Voice Assistant MediaPlayer implementation using ALSA (aplay).
 
     This class provides the MediaPlayer interface expected by LVA and
-    delegates all playback logic to LibMpvPlayer.
+    delegates all playback logic to AlsaPlayer.
     """
 
     def __init__(self, device: str | None = None) -> None:
         self._log = logging.getLogger(self.__class__.__name__)
-        self._player = LibMpvPlayer(device=device)
+        self._player = AlsaPlayer(device=device)
         self._done_callback: Optional[Callable[[], None]] = None
         self._playlist: List[str] = []
 
-        self._log.debug("MpvMediaPlayer initialized (device=%s)", device)
+        self._log.debug("AudioPlayer initialized (device=%s)", device)
 
     def play(
         self,

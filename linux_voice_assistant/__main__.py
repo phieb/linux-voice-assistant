@@ -11,14 +11,15 @@ from pathlib import Path
 from queue import Queue
 from typing import Dict, List, Optional, Set, Union
 
+import subprocess
+
 import numpy as np
-import soundcard as sc
 from getmac import get_mac_address  # type: ignore
 from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures
 from pyopen_wakeword import OpenWakeWord, OpenWakeWordFeatures
 
 from .models import AvailableWakeWord, Preferences, ServerState, WakeWordType
-from .mpv_player import MpvMediaPlayer
+from .audio_player import AudioPlayer
 from .satellite import VoiceSatelliteProtocol
 from .util import (
     get_default_interface,
@@ -158,21 +159,17 @@ async def main() -> None:
     args = parser.parse_args()
 
     if args.list_input_devices:
-        print("Audio Input devices:")
-        print("=" * 13)
-        for idx, mic in enumerate(sc.all_microphones()):
-            print(f"[{idx}]", mic.name)
+        result = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
+        print("Input devices (ALSA):")
+        print("=" * 21)
+        print(result.stdout or result.stderr)
         return
 
     if args.list_output_devices:
-        from mpv import MPV
-
-        player = MPV()
-        print("Audio output devices:")
-        print("=" * 14)
-
-        for speaker in player.audio_device_list:  # type: ignore
-            print(speaker["name"] + ":", speaker["description"])
+        result = subprocess.run(["aplay", "-l"], capture_output=True, text=True)
+        print("Output devices (ALSA):")
+        print("=" * 22)
+        print(result.stdout or result.stderr)
         return
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
@@ -227,17 +224,6 @@ async def main() -> None:
     # Resolve download dir
     args.download_dir = Path(args.download_dir)
     args.download_dir.mkdir(parents=True, exist_ok=True)
-
-    # Resolve microphone
-    if args.audio_input_device is not None:
-        try:
-            args.audio_input_device = int(args.audio_input_device)
-        except ValueError:
-            pass
-
-        mic = sc.get_microphone(args.audio_input_device)
-    else:
-        mic = sc.default_microphone()
 
     # Load available wake words
     wake_word_dirs = [Path(ww_dir) for ww_dir in args.wake_word_dir]
@@ -347,8 +333,8 @@ async def main() -> None:
         wake_words=wake_models,
         active_wake_words=active_wake_words,
         stop_word=stop_model,
-        music_player=MpvMediaPlayer(device=args.audio_output_device),
-        tts_player=MpvMediaPlayer(device=args.audio_output_device),
+        music_player=AudioPlayer(device=args.audio_output_device),
+        tts_player=AudioPlayer(device=args.audio_output_device),
         wakeup_sound=args.wakeup_sound,
         timer_finished_sound=args.timer_finished_sound,
         processing_sound=args.processing_sound,
@@ -397,7 +383,7 @@ async def main() -> None:
 
     process_audio_thread = threading.Thread(
         target=process_audio,
-        args=(state, mic, args.audio_input_block_size),
+        args=(state, args.audio_input_device, args.audio_input_block_size),
         daemon=True,
     )
     process_audio_thread.start()
@@ -413,8 +399,7 @@ async def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        state.audio_queue.put_nowait(None)
-        process_audio_thread.join()
+        process_audio_thread.join(timeout=2.0)
 
     _LOGGER.debug("Server stopped")
 
@@ -422,8 +407,8 @@ async def main() -> None:
 # -----------------------------------------------------------------------------
 
 
-def process_audio(state: ServerState, mic, block_size: int):
-    """Process audio chunks from the microphone."""
+def process_audio(state: ServerState, device: Optional[str], block_size: int):
+    """Process audio chunks from the microphone via arecord (ALSA)."""
 
     wake_words: List[Union[MicroWakeWord, OpenWakeWord]] = []
     micro_features: Optional[MicroWakeWordFeatures] = None
@@ -435,12 +420,19 @@ def process_audio(state: ServerState, mic, block_size: int):
 
     last_active: Optional[float] = None
 
+    arecord_cmd = ["arecord", "-r", "16000", "-c", "1", "-f", "S16_LE", "-t", "raw"]
+    if device:
+        arecord_cmd.extend(["-D", device])
+    bytes_per_chunk = block_size * 2  # 2 bytes per S16_LE sample
+
     try:
-        _LOGGER.debug("Opening audio input device: %s", mic.name)
-        with mic.recorder(samplerate=16000, channels=1, blocksize=block_size) as mic_in:
+        _LOGGER.debug("Starting audio capture: %s", " ".join(arecord_cmd))
+        with subprocess.Popen(arecord_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as mic_proc:
             while True:
-                audio_chunk_array = mic_in.record(block_size).reshape(-1)
-                audio_chunk = (np.clip(audio_chunk_array, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()  # little-endian 16-bit signed
+                audio_chunk = mic_proc.stdout.read(bytes_per_chunk)
+                if len(audio_chunk) < bytes_per_chunk:
+                    _LOGGER.error("Audio capture ended unexpectedly (arecord exited)")
+                    sys.exit(1)
 
                 if state.satellite is None:
                     continue

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
         MuteSwitchEntity,
         ThinkingSoundEntity,
     )
-    from .mpv_player import MpvMediaPlayer
+    from .audio_player import AudioPlayer
     from .satellite import VoiceSatelliteProtocol
 
 _LOGGER = logging.getLogger(__name__)
@@ -76,8 +76,8 @@ class ServerState:
     wake_words: "Dict[str, Union[MicroWakeWord, OpenWakeWord]]"
     active_wake_words: Set[str]
     stop_word: "Optional[MicroWakeWord]"
-    music_player: "MpvMediaPlayer"
-    tts_player: "MpvMediaPlayer"
+    music_player: "AudioPlayer"
+    tts_player: "AudioPlayer"
     wakeup_sound: str
     processing_sound: str
     timer_finished_sound: str
