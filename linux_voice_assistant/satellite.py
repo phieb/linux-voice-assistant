@@ -561,7 +561,7 @@ class VoiceSatelliteProtocol(APIServer):
                 _LOGGER.debug("Sent state message %d: %s", i, type(msg).__name__)
             _LOGGER.debug("All entity states sent after connect")
             if self.state.stop_word is not None:
-                self.state.stop_word.process_streaming(np.zeros(512, dtype=np.float32))
+                self.state.stop_word.process_streaming(np.zeros((1, 1, 512), dtype=np.float32))
 
     def _download_external_wake_word(self, external_wake_word: VoiceAssistantExternalWakeWord) -> Optional[AvailableWakeWord]:
         eww_dir = self.state.download_dir / "external_wake_words"
