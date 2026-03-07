@@ -1,29 +1,17 @@
 import logging
 import os
+import shlex
 import subprocess
-import tempfile
 import threading
 import urllib.request
-from typing import Callable, List, Optional
+from typing import IO, Callable, List, Optional
 
 from linux_voice_assistant.player.base import AudioPlayer
 from linux_voice_assistant.player.state import PlayerState
 
 
 class AlsaPlayer(AudioPlayer):
-    """Audio player using ALSA (aplay) for lightweight headless playback.
-
-    Replaces the libmpv-based player with subprocess calls to aplay,
-    avoiding the heavy mpv/libmpv dependency on headless devices like the Pi Zero 2W.
-
-    Supported formats:
-    - WAV: played directly via aplay
-    - FLAC: decoded via `flac -d -c` piped to aplay (requires the flac package)
-    - HTTP/HTTPS URLs: downloaded to a temp file, then played by detected format
-
-    Volume control is applied via amixer (best-effort; silently skipped if unavailable).
-    Pause/resume use SIGSTOP/SIGCONT on the aplay process.
-    """
+    """Audio player using ALSA (aplay) for lightweight headless playback."""
 
     def __init__(self, device: Optional[str] = None) -> None:
         self._log = logging.getLogger(self.__class__.__name__)
@@ -36,19 +24,20 @@ class AlsaPlayer(AudioPlayer):
         self._user_volume: float = 100.0
         self._duck_factor: float = 1.0
 
-    # -------- Playback control --------
-
     def play(
         self,
         url: str,
         done_callback: Optional[Callable[[], None]] = None,
         stop_first: bool = True,
     ) -> None:
-        self._stop_procs(invoke_callback=False)
+        if stop_first:
+            self._stop_procs(invoke_callback=False)
+
         with self._state_lock:
             self._done_callback = done_callback
             self._state = PlayerState.LOADING
             self._stop_event.clear()
+
         threading.Thread(target=self._play_thread, args=(url,), daemon=True).start()
 
     def pause(self) -> None:
@@ -86,8 +75,6 @@ class AlsaPlayer(AudioPlayer):
         with self._state_lock:
             return self._state
 
-    # -------- Volume / Ducking --------
-
     def set_volume(self, volume: float) -> None:
         with self._state_lock:
             self._user_volume = max(0.0, min(100.0, float(volume)))
@@ -103,42 +90,21 @@ class AlsaPlayer(AudioPlayer):
             self._duck_factor = 1.0
         self._apply_volume()
 
-    # -------- Internal helpers --------
-
     def _play_thread(self, url: str) -> None:
-        tmp_path: Optional[str] = None
         try:
-            # Download HTTP(S) URLs to a temp file before playing
             if url.startswith(("http://", "https://")):
-                with self._state_lock:
-                    self._state = PlayerState.LOADING
-                with urllib.request.urlopen(url, timeout=10) as resp:
-                    content_type = resp.headers.get("Content-Type", "")
-                    suffix = ".flac" if "flac" in content_type else ".wav"
-                    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                        tmp.write(resp.read())
-                        tmp_path = tmp.name
-                play_path = tmp_path
+                self._stream_url(url)
             else:
-                play_path = url
+                # Local file
+                ext = os.path.splitext(url)[1].lower()
+                if ext == ".flac":
+                    self._play_flac(url)
+                else:
+                    self._play_wav(url)
 
-            if self._stop_event.is_set():
-                return
-
-            ext = os.path.splitext(play_path)[1].lower()
-            completed = self._play_flac(play_path) if ext == ".flac" else self._play_wav(play_path)
-
-            if completed:
-                callback = None
-                with self._state_lock:
-                    self._state = PlayerState.IDLE
-                    callback = self._done_callback
-                    self._done_callback = None
-                if callback:
-                    try:
-                        callback()
-                    except Exception:
-                        self._log.exception("Error in done_callback")
+            # Check if playback finished naturally
+            if not self._stop_event.is_set():
+                self._invoke_done_callback()
 
         except Exception:
             self._log.exception("Error during playback of %s", url)
@@ -146,16 +112,75 @@ class AlsaPlayer(AudioPlayer):
                 self._state = PlayerState.ERROR
                 self._done_callback = None
         finally:
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
             with self._state_lock:
                 self._procs = []
+                self._state = PlayerState.IDLE
 
-    def _play_wav(self, path: str) -> bool:
-        """Play a WAV (or any aplay-compatible) file. Returns True on natural completion."""
+    def _stream_url(self, url: str) -> None:
+        """Stream audio from a URL to aplay, decoding if necessary."""
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            content_type = resp.headers.get("Content-Type", "audio/wav")
+            
+            decoder_cmd: Optional[List[str]] = None
+            if "flac" in content_type:
+                decoder_cmd = ["flac", "-d", "-c", "--silent", "-"]
+            elif "mpeg" in content_type:
+                decoder_cmd = ["mpg123", "-s", "-"]
+
+            aplay_cmd = ["aplay"]
+            if self._device:
+                aplay_cmd.extend(["-D", self._device])
+
+            decoder_proc = None
+            if decoder_cmd:
+                decoder_proc = subprocess.Popen(
+                    decoder_cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                aplay_stdin = decoder_proc.stdout
+            else: # WAV or other direct format
+                aplay_stdin = subprocess.PIPE
+            
+            aplay_proc = subprocess.Popen(
+                aplay_cmd,
+                stdin=aplay_stdin,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            if decoder_proc and decoder_proc.stdout:
+                decoder_proc.stdout.close()
+            
+            procs = [p for p in [decoder_proc, aplay_proc] if p]
+            with self._state_lock:
+                self._procs = procs
+                self._state = PlayerState.PLAYING
+            
+            # Get the correct stdin to write to
+            stream_stdin = (decoder_proc.stdin if decoder_proc else aplay_proc.stdin)
+            if not stream_stdin:
+                return # Should not happen
+
+            # Stream from URL to decoder/player
+            while not self._stop_event.is_set():
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                try:
+                    stream_stdin.write(chunk)
+                except (BrokenPipeError, OSError):
+                    break # Player process probably died
+            
+            stream_stdin.close()
+            
+            # Wait for processes to finish
+            for proc in procs:
+                proc.wait()
+
+
+    def _play_wav(self, path: str) -> None:
         cmd = ["aplay"]
         if self._device:
             cmd.extend(["-D", self._device])
@@ -167,15 +192,8 @@ class AlsaPlayer(AudioPlayer):
             self._state = PlayerState.PLAYING
 
         proc.wait()
-        with self._state_lock:
-            self._procs = []
-        return not self._stop_event.is_set() and proc.returncode == 0
 
-    def _play_flac(self, path: str) -> bool:
-        """Decode FLAC via flac and pipe to aplay. Returns True on natural completion.
-
-        Requires the `flac` package to be installed (apt install flac).
-        """
+    def _play_flac(self, path: str) -> None:
         flac_proc = subprocess.Popen(
             ["flac", "-d", "-c", "--silent", path],
             stdout=subprocess.PIPE,
@@ -190,7 +208,8 @@ class AlsaPlayer(AudioPlayer):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        flac_proc.stdout.close()  # Allow flac_proc to receive SIGPIPE if aplay exits early
+        if flac_proc.stdout:
+            flac_proc.stdout.close()
 
         with self._state_lock:
             self._procs = [flac_proc, aplay_proc]
@@ -198,23 +217,20 @@ class AlsaPlayer(AudioPlayer):
 
         aplay_proc.wait()
         flac_proc.wait()
-        with self._state_lock:
-            self._procs = []
-        return not self._stop_event.is_set() and aplay_proc.returncode == 0
 
     def _stop_procs(self, invoke_callback: bool = True) -> None:
-        callback = None
-        procs = []
         with self._state_lock:
             self._stop_event.set()
             procs = self._procs[:]
             self._procs = []
-            if invoke_callback:
-                callback = self._done_callback
-            self._done_callback = None
-            self._state = PlayerState.IDLE
+            
+            if self._state == PlayerState.IDLE:
+                # Nothing to do
+                return
 
-        for proc in reversed(procs):  # terminate aplay before flac
+            self._state = PlayerState.IDLE
+            
+        for proc in reversed(procs):
             try:
                 proc.terminate()
                 proc.wait(timeout=1.0)
@@ -222,12 +238,21 @@ class AlsaPlayer(AudioPlayer):
                 proc.kill()
             except Exception:
                 pass
+        
+        if invoke_callback:
+            self._invoke_done_callback()
 
+    def _invoke_done_callback(self) -> None:
+        callback = None
+        with self._state_lock:
+            callback = self._done_callback
+            self._done_callback = None
+        
         if callback:
             try:
                 callback()
             except Exception:
-                self._log.exception("Error in stop callback")
+                self._log.exception("Error in done_callback")
 
     def _apply_volume(self) -> None:
         with self._state_lock:
@@ -239,4 +264,4 @@ class AlsaPlayer(AudioPlayer):
                 check=False,
             )
         except FileNotFoundError:
-            pass  # amixer not available on this system
+            pass
