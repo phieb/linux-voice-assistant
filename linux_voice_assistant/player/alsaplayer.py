@@ -128,7 +128,8 @@ class AlsaPlayer(AudioPlayer):
 
             if "flac" in content_type:
                 decoder_cmd = ["flac", "-d", "-c", "--silent", "-"]
-            elif "mpeg" in content_type or "mp3" in content_type:
+            #elif "mpeg" in content_type or "mp3" in content_type:
+            else:
                 rate = "22050"
                 decoder_cmd = ["mpg123", "--rate",rate, "--mono", "-s", "-"]
                 aplay_cmd.extend(["-r", rate, "-c", "1", "-f", "S16_LE"])
