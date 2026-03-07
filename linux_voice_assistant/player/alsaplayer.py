@@ -133,6 +133,7 @@ class AlsaPlayer(AudioPlayer):
                 rate = "22050"
                 decoder_cmd = ["mpg123", "--rate",rate, "--mono", "-s", "-"]
                 aplay_cmd.extend(["-r", rate, "-c", "1", "-f", "S16_LE"])
+                logging.debug("Assuming MPEG stream, using rate %s - content_type: %s", rate, content_type)
 
 
             decoder_proc = None
