@@ -447,9 +447,8 @@ def process_audio(state: ServerState, device: Optional[str], block_size: int):
                             if micro_features is None:
                                 micro_features = MicroWakeWordFeatures()
 
-                            audio_float = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32) / 32768.0
                             micro_inputs.clear()
-                            micro_inputs.extend(micro_features.process_streaming(audio_float))
+                            micro_inputs.extend(micro_features.process_streaming(audio_chunk))
 
                             stopped = False
                             for micro_input in micro_inputs:
@@ -487,14 +486,13 @@ def process_audio(state: ServerState, device: Optional[str], block_size: int):
                         state.satellite.handle_audio(audio_chunk)
 
                         assert micro_features is not None
-                        audio_array = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32) / 32768.0
                         micro_inputs.clear()
-                        micro_inputs.extend(micro_features.process_streaming(audio_array))
+                        micro_inputs.extend(micro_features.process_streaming(audio_chunk))
 
                         if has_oww:
                             assert oww_features is not None
                             oww_inputs.clear()
-                            oww_inputs.extend(oww_features.process_streaming(audio_array))
+                            oww_inputs.extend(oww_features.process_streaming(audio_chunk))
 
                         for wake_word in wake_words:
                             activated = False
