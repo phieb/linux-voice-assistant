@@ -567,7 +567,7 @@ class VoiceSatelliteProtocol(APIServer):
         eww_dir = self.state.download_dir / "external_wake_words"
         eww_dir.mkdir(parents=True, exist_ok=True)
 
-        config_path = eww_dir / f"{external_wake_word.id}.json"
+        config_.path = eww_dir / f"{external_wake_word.id}.json"
         should_download_config = not config_path.exists()
 
         # Check if we need to download the model file
