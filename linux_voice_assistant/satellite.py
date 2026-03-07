@@ -6,6 +6,8 @@ import logging
 import posixpath
 import shutil
 import time
+
+import numpy as np
 from collections.abc import Iterable
 from typing import Dict, List, Optional, Set, Union
 from urllib.parse import urlparse, urlunparse
@@ -54,6 +56,22 @@ PROTO_TO_MESSAGE_TYPE = {v: k for k, v in MESSAGE_TYPE_TO_PROTO.items()}
 
 
 class VoiceSatelliteProtocol(APIServer):
+    """ESPHome voice assistant protocol handler.
+    
+    This class manages communication between the Linux Voice Assistant and Home Assistant
+    via the ESPHome API. It handles:
+    
+    - Local wake word detection (MicroWakeWord, OpenWakeWord)
+    - External wake word detection (audio streamed to HA or external services)
+    - Audio streaming and TTS playback
+    - Integration with media players and other entities
+    
+    When external_wake_word_enabled is True on the ServerState:
+    - Audio is continuously streamed to Home Assistant
+    - Local wake word detection is skipped
+    - HA's wake word engine (or external microWakeWord server) performs detection
+    - Wake word triggers flow back through ESPHome protocol messages
+    """
 
     def __init__(self, state: ServerState) -> None:
         super().__init__(state.name)
@@ -156,6 +174,9 @@ class VoiceSatelliteProtocol(APIServer):
         self._pipeline_active = False
         self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
         self._disconnect_event = asyncio.Event()
+        
+        if self.state.external_wake_word_enabled:
+            _LOGGER.info("External wake word detection mode active - continuous audio streaming enabled")
 
     def _set_thinking_sound_enabled(self, new_state: bool) -> None:
         self.state.thinking_sound_enabled = bool(new_state)
@@ -177,7 +198,8 @@ class VoiceSatelliteProtocol(APIServer):
             self._is_streaming_audio = False
             self.state.tts_player.stop()
             # Stop any ongoing voice processing
-            self.state.stop_word.is_active = False  # type: ignore
+            if self.state.stop_word is not None:
+                self.state.stop_word.is_active = False
             self.state.tts_player.play(self.state.mute_sound)
         else:
             # voice_assistant.start_continuous behavior
@@ -199,7 +221,8 @@ class VoiceSatelliteProtocol(APIServer):
             processing = getattr(self.state, "processing_sound", None)
             if processing:
                 _LOGGER.debug("Playing processing sound: %s", processing)
-                self.state.stop_word.is_active = True  # type: ignore
+                if self.state.stop_word is not None:
+                    self.state.stop_word.is_active = True
                 self._processing = True
                 self.duck()
                 self.state.tts_player.play(self.state.processing_sound)
@@ -236,7 +259,8 @@ class VoiceSatelliteProtocol(APIServer):
         _LOGGER.debug("Timer event: type=%s", event_type.name)
         if event_type == VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_FINISHED:
             if not self._timer_finished:
-                self.state.active_wake_words.add(self.state.stop_word.id)
+                if self.state.stop_word is not None:
+                    self.state.active_wake_words.add(self.state.stop_word.id)
                 self._timer_finished = True
                 self.duck()
                 self._play_timer_finished()
@@ -261,7 +285,8 @@ class VoiceSatelliteProtocol(APIServer):
 
             urls.append(msg.media_id)
 
-            self.state.active_wake_words.add(self.state.stop_word.id)
+            if self.state.stop_word is not None:
+                self.state.active_wake_words.add(self.state.stop_word.id)
             self._continue_conversation = msg.start_conversation
 
             self.duck()
@@ -373,6 +398,18 @@ class VoiceSatelliteProtocol(APIServer):
 
         self.send_messages([VoiceAssistantAudio(data=audio_chunk)])
 
+    def handle_audio_continuous(self, audio_chunk: bytes) -> None:
+        """Stream audio continuously (for external wake word detection mode).
+        
+        Unlike handle_audio(), this method always streams audio regardless of
+        _is_streaming_audio state, allowing external services (like HA or a
+        microWakeWord server) to perform wake word detection.
+        """
+        if self.state.muted:
+            return
+
+        self.send_messages([VoiceAssistantAudio(data=audio_chunk)])
+
     def wakeup(self, wake_word: Union[MicroWakeWord, OpenWakeWord]) -> None:
         if self._timer_finished:
             # Stop timer instead
@@ -408,7 +445,8 @@ class VoiceSatelliteProtocol(APIServer):
         self._is_streaming_audio = True
 
     def stop(self) -> None:
-        self.state.active_wake_words.discard(self.state.stop_word.id)
+        if self.state.stop_word is not None:
+            self.state.active_wake_words.discard(self.state.stop_word.id)
         self._pipeline_active = False
 
         if self._timer_finished:
@@ -428,7 +466,8 @@ class VoiceSatelliteProtocol(APIServer):
         self._tts_played = True
         _LOGGER.debug("Playing TTS response: %s", self._tts_url)
 
-        self.state.active_wake_words.add(self.state.stop_word.id)
+        if self.state.stop_word is not None:
+            self.state.active_wake_words.add(self.state.stop_word.id)
         self.state.tts_player.play(self._tts_url, done_callback=self._tts_finished)
 
     def duck(self) -> None:
@@ -452,6 +491,8 @@ class VoiceSatelliteProtocol(APIServer):
         else:
             self.unduck()
 
+        if self.state.stop_word is not None:
+            self.state.active_wake_words.discard(self.state.stop_word.id)
         _LOGGER.debug("TTS response finished")
 
     def _play_timer_finished(self) -> None:
@@ -490,7 +531,8 @@ class VoiceSatelliteProtocol(APIServer):
         except Exception:  # pragma: no cover - defensive safety net
             _LOGGER.exception("Failed to stop TTS player during disconnect")
 
-        self.state.stop_word.is_active = False
+        if self.state.stop_word is not None:
+            self.state.stop_word.is_active = False
         self.state.connected = False
         if self.state.satellite is self:
             self.state.satellite = None
@@ -518,6 +560,8 @@ class VoiceSatelliteProtocol(APIServer):
             for i, msg in enumerate(states):
                 _LOGGER.debug("Sent state message %d: %s", i, type(msg).__name__)
             _LOGGER.debug("All entity states sent after connect")
+            if self.state.stop_word is not None:
+                self.state.stop_word.process_streaming(np.zeros(512, dtype=np.float32))
 
     def _download_external_wake_word(self, external_wake_word: VoiceAssistantExternalWakeWord) -> Optional[AvailableWakeWord]:
         eww_dir = self.state.download_dir / "external_wake_words"

@@ -146,6 +146,11 @@ async def main() -> None:
         help="Enable thinking finish sound, when the assistant is done thinking and needed more time to process",
     )
     parser.add_argument(
+        "--external-wake-word",
+        action="store_true",
+        help="Skip local wake word detection and stream audio to Home Assistant for external wake word detection",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Add this to enable debug logging",
@@ -282,32 +287,41 @@ async def main() -> None:
     if args.enable_thinking_sound:
         preferences.thinking_sound = 1
 
-    # Load wake/stop models
+    # Load wake word models only if using local wake word detection
+    # (skip in external mode to save startup time and memory on Pi Zero)
+    # Stop model is always loaded (stop word detection runs locally in both modes)
     active_wake_words: Set[str] = set()
     wake_models: Dict[str, Union[MicroWakeWord, OpenWakeWord]] = {}
-    if preferences.active_wake_words:
-        # Load preferred models
-        for wake_word_id in preferences.active_wake_words:
-            wake_word = available_wake_words.get(wake_word_id)
-            if wake_word is None:
-                _LOGGER.warning("Unrecognized wake word id: %s", wake_word_id)
-                continue
+    stop_model: Optional[MicroWakeWord] = None
+
+    if not args.external_wake_word:
+        # Local mode: load all wake word models
+        if preferences.active_wake_words:
+            # Load preferred models
+            for wake_word_id in preferences.active_wake_words:
+                wake_word = available_wake_words.get(wake_word_id)
+                if wake_word is None:
+                    _LOGGER.warning("Unrecognized wake word id: %s", wake_word_id)
+                    continue
+
+                _LOGGER.debug("Loading wake model: %s", wake_word_id)
+                wake_models[wake_word_id] = wake_word.load()
+                active_wake_words.add(wake_word_id)
+
+        if not wake_models:
+            # Load default model
+            wake_word_id = args.wake_model
+            wake_word = available_wake_words[wake_word_id]
 
             _LOGGER.debug("Loading wake model: %s", wake_word_id)
             wake_models[wake_word_id] = wake_word.load()
             active_wake_words.add(wake_word_id)
 
-    if not wake_models:
-        # Load default model
-        wake_word_id = args.wake_model
-        wake_word = available_wake_words[wake_word_id]
+    else:
+        # External mode: skip local wake word model loading (saves startup time and memory on Pi Zero)
+        _LOGGER.info("External wake word detection mode - skipping local wake word model loading")
 
-        _LOGGER.debug("Loading wake model: %s", wake_word_id)
-        wake_models[wake_word_id] = wake_word.load()
-        active_wake_words.add(wake_word_id)
-
-    # TODO: allow openWakeWord for "stop"
-    stop_model: Optional[MicroWakeWord] = None
+    # Always load stop model (stop word detection runs locally in both modes)
     for wake_word_dir in wake_word_dirs:
         stop_config_path = wake_word_dir / f"{args.stop_model}.json"
         if not stop_config_path.exists():
@@ -345,10 +359,16 @@ async def main() -> None:
         refractory_seconds=args.refractory_seconds,
         download_dir=args.download_dir,
         volume=initial_volume,
+        external_wake_word_enabled=args.external_wake_word,
     )
 
     if args.enable_thinking_sound:
         state.save_preferences()
+
+    if state.external_wake_word_enabled:
+        _LOGGER.info("External wake word detection enabled - local wake word detection will be skipped")
+    else:
+        _LOGGER.info("Local wake word detection enabled")
 
     initial_volume_percent = int(round(initial_volume * 100))
     state.music_player.set_volume(initial_volume_percent)
@@ -425,61 +445,96 @@ def process_audio(state: ServerState, mic, block_size: int):
                 if state.satellite is None:
                     continue
 
-                if (not wake_words) or (state.wake_words_changed and state.wake_words):
-                    # Update list of wake word models to process
-                    state.wake_words_changed = False
-                    wake_words = [ww for ww in state.wake_words.values() if ww.id in state.active_wake_words]
-
-                    has_oww = False
-                    for wake_word in wake_words:
-                        if isinstance(wake_word, OpenWakeWord):
-                            has_oww = True
-
-                    if micro_features is None:
-                        micro_features = MicroWakeWordFeatures()
-
-                    if has_oww and (oww_features is None):
-                        oww_features = OpenWakeWordFeatures.from_builtin()
-
                 try:
-                    state.satellite.handle_audio(audio_chunk)
+                    if state.external_wake_word_enabled:
+                        # External wake word detection: stream audio continuously to external service (HA/microWakeWord).
+                        # Wake word detection is handled externally, but stop word detection still runs locally.
+                        state.satellite.handle_audio_continuous(audio_chunk)
 
-                    assert micro_features is not None
-                    micro_inputs.clear()
-                    micro_inputs.extend(micro_features.process_streaming(audio_chunk))
+                        if state.stop_word is not None:
+                            if micro_features is None:
+                                micro_features = MicroWakeWordFeatures()
 
-                    if has_oww:
-                        assert oww_features is not None
-                        oww_inputs.clear()
-                        oww_inputs.extend(oww_features.process_streaming(audio_chunk))
+                            micro_inputs.clear()
+                            micro_inputs.extend(micro_features.process_streaming(audio_chunk))
 
-                    for wake_word in wake_words:
-                        activated = False
-                        if isinstance(wake_word, MicroWakeWord):
+                            stopped = False
                             for micro_input in micro_inputs:
-                                if wake_word.process_streaming(micro_input):
-                                    activated = True
-                        elif isinstance(wake_word, OpenWakeWord):
-                            for oww_input in oww_inputs:
-                                for prob in wake_word.process_streaming(oww_input):
-                                    if prob > 0.5:
+                                if state.stop_word.process_streaming(micro_input):
+                                    stopped = True
+
+                            if (
+                                stopped
+                                and (state.stop_word.id in state.active_wake_words)
+                                and not state.muted
+                            ):
+                                state.satellite.stop()
+                    else:
+                        # Local wake word detection (original behavior)
+                        if (not wake_words) or (state.wake_words_changed and state.wake_words):
+                            # Update list of wake word models to process
+                            state.wake_words_changed = False
+                            wake_words = [
+                                ww
+                                for ww in state.wake_words.values()
+                                if ww.id in state.active_wake_words
+                            ]
+
+                            has_oww = False
+                            for wake_word in wake_words:
+                                if isinstance(wake_word, OpenWakeWord):
+                                    has_oww = True
+
+                            if micro_features is None:
+                                micro_features = MicroWakeWordFeatures()
+
+                            if has_oww and (oww_features is None):
+                                oww_features = OpenWakeWordFeatures.from_builtin()
+
+                        state.satellite.handle_audio(audio_chunk)
+
+                        assert micro_features is not None
+                        micro_inputs.clear()
+                        micro_inputs.extend(micro_features.process_streaming(audio_chunk))
+
+                        if has_oww:
+                            assert oww_features is not None
+                            oww_inputs.clear()
+                            oww_inputs.extend(oww_features.process_streaming(audio_chunk))
+
+                        for wake_word in wake_words:
+                            activated = False
+                            if isinstance(wake_word, MicroWakeWord):
+                                for micro_input in micro_inputs:
+                                    if wake_word.process_streaming(micro_input):
                                         activated = True
+                            elif isinstance(wake_word, OpenWakeWord):
+                                for oww_input in oww_inputs:
+                                    for prob in wake_word.process_streaming(oww_input):
+                                        if prob > 0.5:
+                                            activated = True
 
-                        if activated and not state.muted:
-                            # Check refractory
-                            now = time.monotonic()
-                            if (last_active is None) or ((now - last_active) > state.refractory_seconds):
-                                state.satellite.wakeup(wake_word)
-                                last_active = now
+                            if activated and not state.muted:
+                                # Check refractory
+                                now = time.monotonic()
+                                if (last_active is None) or (
+                                    (now - last_active) > state.refractory_seconds
+                                ):
+                                    state.satellite.wakeup(wake_word)
+                                    last_active = now
 
-                    # Always process to keep state correct
-                    stopped = False
-                    for micro_input in micro_inputs:
-                        if state.stop_word.process_streaming(micro_input):
-                            stopped = True
+                        # Always process to keep state correct
+                        stopped = False
+                        for micro_input in micro_inputs:
+                            if state.stop_word.process_streaming(micro_input):
+                                stopped = True
 
-                    if stopped and (state.stop_word.id in state.active_wake_words) and not state.muted:
-                        state.satellite.stop()
+                        if (
+                            stopped
+                            and (state.stop_word.id in state.active_wake_words)
+                            and not state.muted
+                        ):
+                            state.satellite.stop()
                 except Exception:
                     _LOGGER.exception("Unexpected error handling audio")
     except Exception:

@@ -23,3 +23,7 @@ venv/
 .env
 version.txt
 version_githash.txt
+
+# no AI generated files
+*.md
+.claude/

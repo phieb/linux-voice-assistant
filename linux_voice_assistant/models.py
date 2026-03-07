@@ -75,7 +75,7 @@ class ServerState:
     available_wake_words: "Dict[str, AvailableWakeWord]"
     wake_words: "Dict[str, Union[MicroWakeWord, OpenWakeWord]]"
     active_wake_words: Set[str]
-    stop_word: "MicroWakeWord"
+    stop_word: "Optional[MicroWakeWord]"
     music_player: "MpvMediaPlayer"
     tts_player: "MpvMediaPlayer"
     wakeup_sound: str
@@ -97,6 +97,7 @@ class ServerState:
     muted: bool = False
     connected: bool = False
     volume: float = 1.0
+    external_wake_word_enabled: bool = False
 
     def save_preferences(self) -> None:
         """Save preferences as JSON."""
