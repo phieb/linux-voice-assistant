@@ -120,16 +120,19 @@ class AlsaPlayer(AudioPlayer):
         """Stream audio from a URL to aplay, decoding if necessary."""
         with urllib.request.urlopen(url, timeout=30) as resp:
             content_type = resp.headers.get("Content-Type", "audio/wav")
-            
             decoder_cmd: Optional[List[str]] = None
-            if "flac" in content_type:
-                decoder_cmd = ["flac", "-d", "-c", "--silent", "-"]
-            elif "mpeg" in content_type:
-                decoder_cmd = ["mpg123", "-s", "-"]
-
+            
             aplay_cmd = ["aplay"]
             if self._device:
                 aplay_cmd.extend(["-D", self._device])
+
+            if "flac" in content_type:
+                decoder_cmd = ["flac", "-d", "-c", "--silent", "-"]
+            elif "mpeg" in content_type:
+                rate = "22050"
+                decoder_cmd = ["mpg123", "--rate",rate, "--mono", "-s", "-"]
+                aplay_cmd.extend(["-r", rate, "-c", "1", "-f", "S16_LE"])
+
 
             decoder_proc = None
             if decoder_cmd:
@@ -173,11 +176,15 @@ class AlsaPlayer(AudioPlayer):
                 except (BrokenPipeError, OSError):
                     break # Player process probably died
             
-            stream_stdin.close()
+            if stream_stdin:
+                stream_stdin.close()
             
             # Wait for processes to finish
             for proc in procs:
-                proc.wait()
+                try:
+                    proc.wait()
+                except Exception:
+                    pass
 
 
     def _play_wav(self, path: str) -> None:
