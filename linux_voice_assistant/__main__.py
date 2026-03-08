@@ -21,6 +21,7 @@ from pyopen_wakeword import OpenWakeWord, OpenWakeWordFeatures
 from .models import AvailableWakeWord, Preferences, ServerState, WakeWordType
 from .audio_player import AudioPlayer
 from .satellite import VoiceSatelliteProtocol
+from .wyoming_wake import WakeWordProxy, WyomingWakeClient
 from .util import (
     get_default_interface,
     get_default_ipv4,
@@ -152,11 +153,25 @@ async def main() -> None:
         help="Skip local wake word detection and stream audio to Home Assistant for external wake word detection",
     )
     parser.add_argument(
+        "--wake-uri",
+        help="URI of a Wyoming wake word service to use for detection (e.g. tcp://192.168.178.52:10400). "
+        "Mutually exclusive with --external-wake-word.",
+    )
+    parser.add_argument(
+        "--wake-word-name",
+        default="okay_nabu",
+        help="Wake word name to request from the Wyoming service (default: okay_nabu)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Add this to enable debug logging",
     )
     args = parser.parse_args()
+
+    if args.wake_uri and args.external_wake_word:
+        print("ERROR: --wake-uri and --external-wake-word are mutually exclusive")
+        sys.exit(1)
 
     if args.list_input_devices:
         result = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
@@ -280,7 +295,7 @@ async def main() -> None:
     wake_models: Dict[str, Union[MicroWakeWord, OpenWakeWord]] = {}
     stop_model: Optional[MicroWakeWord] = None
 
-    if not args.external_wake_word:
+    if not args.external_wake_word and not args.wake_uri:
         # Local mode: load all wake word models
         if preferences.active_wake_words:
             # Load preferred models
@@ -304,8 +319,11 @@ async def main() -> None:
             active_wake_words.add(wake_word_id)
 
     else:
-        # External mode: skip local wake word model loading (saves startup time and memory on Pi Zero)
-        _LOGGER.info("External wake word detection mode - skipping local wake word model loading")
+        # External or Wyoming mode: skip local wake word model loading
+        _LOGGER.info(
+            "%s wake word detection mode - skipping local wake word model loading",
+            "Wyoming" if args.wake_uri else "External HA",
+        )
 
     # Always load stop model (stop word detection runs locally in both modes)
     for wake_word_dir in wake_word_dirs:
@@ -352,9 +370,46 @@ async def main() -> None:
         state.save_preferences()
 
     if state.external_wake_word_enabled:
-        _LOGGER.info("External wake word detection enabled - local wake word detection will be skipped")
+        _LOGGER.info("External wake word detection enabled - streaming audio to Home Assistant")
+    elif args.wake_uri:
+        _LOGGER.info("Wyoming wake word detection enabled at %s (word: %s)", args.wake_uri, args.wake_word_name)
     else:
         _LOGGER.info("Local wake word detection enabled")
+
+    # Set up Wyoming wake word client if requested
+    wyoming_client: Optional[WyomingWakeClient] = None
+    if args.wake_uri:
+        from urllib.parse import urlparse
+
+        parsed_uri = urlparse(args.wake_uri)
+        if parsed_uri.scheme != "tcp":
+            _LOGGER.error("Unsupported wake URI scheme '%s' — only tcp:// is supported", parsed_uri.scheme)
+            sys.exit(1)
+        wyoming_host = parsed_uri.hostname
+        wyoming_port = parsed_uri.port
+        if not wyoming_host or not wyoming_port:
+            _LOGGER.error("Invalid wake URI '%s' — expected tcp://host:port", args.wake_uri)
+            sys.exit(1)
+
+        last_wyoming_active: List[Optional[float]] = [None]
+
+        def on_wyoming_detection(name: str) -> None:
+            if state.satellite is None or state.muted:
+                return
+            now = time.monotonic()
+            if last_wyoming_active[0] is not None and (now - last_wyoming_active[0]) < state.refractory_seconds:
+                _LOGGER.debug("Wyoming detection ignored (refractory period)")
+                return
+            last_wyoming_active[0] = now
+            state.satellite.wakeup(WakeWordProxy(name))
+
+        wyoming_client = WyomingWakeClient(
+            host=wyoming_host,
+            port=wyoming_port,
+            wake_word_names=[args.wake_word_name],
+            on_detection=on_wyoming_detection,
+        )
+        wyoming_client.start()
 
     initial_volume_percent = int(round(initial_volume * 100))
     state.music_player.set_volume(initial_volume_percent)
@@ -383,7 +438,7 @@ async def main() -> None:
 
     process_audio_thread = threading.Thread(
         target=process_audio,
-        args=(state, args.audio_input_device, args.audio_input_block_size),
+        args=(state, args.audio_input_device, args.audio_input_block_size, wyoming_client),
         daemon=True,
     )
     process_audio_thread.start()
@@ -407,7 +462,7 @@ async def main() -> None:
 # -----------------------------------------------------------------------------
 
 
-def process_audio(state: ServerState, device: Optional[str], block_size: int):
+def process_audio(state: ServerState, device: Optional[str], block_size: int, wyoming_client: Optional[WyomingWakeClient] = None):
     """Process audio chunks from the microphone via arecord (ALSA)."""
 
     wake_words: List[Union[MicroWakeWord, OpenWakeWord]] = []
@@ -438,7 +493,33 @@ def process_audio(state: ServerState, device: Optional[str], block_size: int):
                     continue
 
                 try:
-                    if state.external_wake_word_enabled:
+                    if wyoming_client is not None:
+                        # Wyoming mode: Wyoming service detects the wake word; we only stream to HA
+                        # when the pipeline is active (after wakeup), just like local mode.
+                        wyoming_client.send_audio(audio_chunk)
+                        state.satellite.handle_audio(audio_chunk)
+
+                        # Stop word detection still runs locally
+                        if state.stop_word is not None:
+                            if micro_features is None:
+                                micro_features = MicroWakeWordFeatures()
+
+                            micro_inputs.clear()
+                            micro_inputs.extend(micro_features.process_streaming(audio_chunk))
+
+                            stopped = False
+                            for micro_input in micro_inputs:
+                                if state.stop_word.process_streaming(micro_input):
+                                    stopped = True
+
+                            if (
+                                stopped
+                                and (state.stop_word.id in state.active_wake_words)
+                                and not state.muted
+                            ):
+                                state.satellite.stop()
+
+                    elif state.external_wake_word_enabled:
                         # External wake word detection: stream audio continuously to external service (HA/microWakeWord).
                         # Wake word detection is handled externally, but stop word detection still runs locally.
                         state.satellite.handle_audio_continuous(audio_chunk)

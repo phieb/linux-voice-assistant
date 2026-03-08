@@ -212,6 +212,9 @@ Environment=PREFERENCES_FILE="/home/pi/linux-voice-assistant/preferences.json"
 # Environment=AUDIO_INPUT_DEVICE="default"
 # Environment=AUDIO_OUTPUT_DEVICE="default"
 # Environment=ENABLE_THINKING_SOUND="1"
+# Environment=EXTERNAL_WAKE_WORD="1"
+# Environment=WAKE_URI="tcp://192.168.178.52:10400"
+# Environment=WAKE_WORD_NAME="okay_nabu"
 # Environment=WAKE-MODEL="okay_nabu"
 # Environment=REFACTORY_SECONDS="2"
 # Environment=WAKEUP_SOUND="sounds/wake_word_triggered.flac"
@@ -287,8 +290,11 @@ The following variables can be configured in the `.env` or in the service file:
 | `AUDIO_INPUT_DEVICE` | Autodetected | Audio input device name |
 | `AUDIO_OUTPUT_DEVICE` | Autodetected | Audio output device name |
 | `ENABLE_THINKING_SOUND` | false | Set to "1" to enable thinking sound |
+| `EXTERNAL_WAKE_WORD` | (optional) | Set to "1" to stream audio to Home Assistant for external wake word detection. Mutually exclusive with `WAKE_URI` |
+| `WAKE_URI` | (optional) | URI of a Wyoming wake word service, e.g. `tcp://192.168.178.52:10400`. Connects directly to wyoming-microwakeword, bypassing HA. Mutually exclusive with `EXTERNAL_WAKE_WORD` |
+| `WAKE_WORD_NAME` | `okay_nabu` | Wake word name to request from the Wyoming service (only used with `WAKE_URI`) |
 | `WAKE_WORD_DIR` | `app/wakewords` | Path to the wake word directory |
-| `WAKE_MODEL` | `okay_nabu` | Wake word model to use |
+| `WAKE_MODEL` | `okay_nabu` | Wake word model to use (only used with local wake word detection) |
 | `REFACTORY_SECONDS` | `2` | Refractory period in seconds after wake word |
 | `WAKEUP_SOUND` | `sounds/wake_word_triggered.flac` | Sound file for wake word triggered |
 | `TIMER_FINISHED_SOUND` | `sounds/timer_finished.flac` | Sound file for timer finished |

@@ -10,7 +10,8 @@ Experimental Linux-Voice-Assistant for [Home Assistant](https://www.home-assista
 
 - Works with [Home Assistant](https://www.home-assistant.io/integrations/esphome/)
 - Local wake word detection using integrated [OpenWakeWord](https://github.com/dscripka/openWakeWord) or [MicroWakeWord](https://github.com/kahrendt/microWakeWord)
-- External wake word detection mode (`--external-wake-word`): offloads wake word detection to Home Assistant, while stop word detection still runs locally — useful for resource-constrained devices like the Raspberry Pi Zero 2W
+- External wake word detection mode (`--external-wake-word`): streams audio to Home Assistant continuously, stop word detection still runs locally — useful for resource-constrained devices
+- Wyoming wake word detection mode (`--wake-uri`): connects directly to a [wyoming-microwakeword](https://github.com/rhasspy/wyoming-microwakeword) (or compatible) service via TCP, bypassing Home Assistant for wake word detection
 - Supports multiple architectures (linux/amd64 and linux/aarch64)
 - Automated builds with artifact attestation for security
 - Supports multiple wake words and languages
@@ -43,7 +44,8 @@ For all other users we have different installation methods available (Docker, sy
 ``` sh
 usage: __main__.py [-h] [--name NAME] [--audio-input-device AUDIO_INPUT_DEVICE] [--list-input-devices] [--audio-input-block-size AUDIO_INPUT_BLOCK_SIZE] [--audio-output-device AUDIO_OUTPUT_DEVICE] [--list-output-devices] [--wake-word-dir WAKE_WORD_DIR]
                    [--wake-model WAKE_MODEL] [--stop-model STOP_MODEL] [--download-dir DOWNLOAD_DIR] [--refractory-seconds REFRACTORY_SECONDS] [--wakeup-sound WAKEUP_SOUND] [--timer-finished-sound TIMER_FINISHED_SOUND] [--processing-sound PROCESSING_SOUND]
-                   [--mute-sound MUTE_SOUND] [--unmute-sound UNMUTE_SOUND] [--preferences-file PREFERENCES_FILE] [--host HOST] [--network-interface NETWORK_INTERFACE] [--port PORT] [--enable-thinking-sound] [--external-wake-word] [--debug]
+                   [--mute-sound MUTE_SOUND] [--unmute-sound UNMUTE_SOUND] [--preferences-file PREFERENCES_FILE] [--host HOST] [--network-interface NETWORK_INTERFACE] [--port PORT] [--enable-thinking-sound] [--external-wake-word]
+                   [--wake-uri WAKE_URI] [--wake-word-name WAKE_WORD_NAME] [--debug]
 ```
 
 | Parameter | Description | Default |
@@ -67,7 +69,9 @@ usage: __main__.py [-h] [--name NAME] [--audio-input-device AUDIO_INPUT_DEVICE] 
 | `--network-interface` | Network interface for ESPHome server | Autodetected |
 | `--port` | Port for ESPHome server | 6053 |
 | `--enable-thinking-sound` | Enable thinking sound on startup | False |
-| `--external-wake-word` | Offload wake word detection to Home Assistant; audio is streamed continuously while stop word detection still runs locally | False |
+| `--external-wake-word` | Offload wake word detection to Home Assistant; audio is streamed continuously while stop word detection still runs locally. Mutually exclusive with `--wake-uri` | False |
+| `--wake-uri` | URI of a Wyoming wake word service (e.g. `tcp://192.168.178.52:10400`). Connects directly to wyoming-microwakeword, bypassing HA for wake word detection. Mutually exclusive with `--external-wake-word` | None |
+| `--wake-word-name` | Wake word name to request from the Wyoming service (only used with `--wake-uri`) | `okay_nabu` |
 | `--debug` | Print DEBUG messages to console | False |
 
 ## Build Information:

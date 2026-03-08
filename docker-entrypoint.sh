@@ -44,6 +44,18 @@ if [ "$ENABLE_THINKING_SOUND" = "1" ]; then
   EXTRA_ARGS+=( "--enable-thinking-sound" )
 fi
 
+if [ "$EXTERNAL_WAKE_WORD" = "1" ]; then
+  EXTRA_ARGS+=( "--external-wake-word" )
+fi
+
+if [ -n "${WAKE_URI}" ]; then
+  EXTRA_ARGS+=( "--wake-uri" "$WAKE_URI" )
+fi
+
+if [ -n "${WAKE_WORD_NAME}" ]; then
+  EXTRA_ARGS+=( "--wake-word-name" "$WAKE_WORD_NAME" )
+fi
+
 if [ -n "${WAKE_WORD_DIR}" ]; then
   EXTRA_ARGS+=( "--wake-word-dir" "$WAKE_WORD_DIR" )
 fi
