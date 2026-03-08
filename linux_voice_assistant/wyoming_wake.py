@@ -3,13 +3,16 @@
 Implements the minimal Wyoming wire format needed to stream audio to a
 wyoming-microwakeword (or compatible) service and receive detections:
 
-  Client → Server:  {"type": "run-detection", "data": {"names": [...]}}\n
+  Client → Server:  {"type": "describe"}\n
+  Server → Client:  {"type": "info", ...}\n
+  Client → Server:  {"type": "run-detection"}\n
   Client → Server:  {"type": "audio-chunk", "data": {...}, "data_length": N}\n<N bytes PCM>
   Server → Client:  {"type": "detection", "data": {"name": "okay_nabu", ...}}\n
 """
 
 import json
 import logging
+import select
 import socket
 import threading
 import time
@@ -68,7 +71,7 @@ class WyomingWakeClient:
         try:
             self._audio_queue.put_nowait(audio_chunk)
         except Exception:
-            pass  # queue full — drop oldest implicitly via maxsize
+            pass  # queue full — drop chunk
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -92,7 +95,7 @@ class WyomingWakeClient:
             # Wyoming handshake:
             #   1. Client → describe
             #   2. Server → info
-            #   3. Client → run-detection
+            #   3. Client → run-detection  (no names — microwakeword uses server-side config)
             sock.settimeout(10.0)
             self._send_event(sock, {"type": "describe"})
 
@@ -117,12 +120,12 @@ class WyomingWakeClient:
                         pass
                     break  # consumed info; proceed
 
-            sock.settimeout(0.05)  # short recv timeout so we can keep sending audio
+            # Use blocking socket for sends; use select() for non-blocking reads.
+            sock.setblocking(True)
 
-            # Ask the service to start detection for the requested wake words
-            self._send_event(sock, {"type": "run-detection", "data": {"names": self._wake_word_names}})
+            # run-detection: no names field — microwakeword activates all loaded models
+            self._send_event(sock, {"type": "run-detection"})
 
-            recv_buf = b""
             while not self._stopped:
                 # Send up to 10 queued audio chunks per cycle to keep latency low
                 for _ in range(10):
@@ -134,16 +137,15 @@ class WyomingWakeClient:
                         return  # stop() was called
                     self._send_audio_chunk(sock, chunk)
 
-                # Read any incoming messages (detection, info, error, …)
-                try:
+                # Non-blocking check for incoming messages (detections, errors, …)
+                readable, _, _ = select.select([sock], [], [], 0.0)
+                if readable:
                     data = sock.recv(4096)
                     if not data:
                         _LOGGER.warning("Wyoming service closed connection")
                         return
                     recv_buf += data
                     recv_buf = self._process_incoming(recv_buf)
-                except socket.timeout:
-                    pass
 
     def _send_event(self, sock: socket.socket, event: dict) -> None:
         sock.sendall((json.dumps(event) + "\n").encode())
