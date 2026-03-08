@@ -87,8 +87,34 @@ class WyomingWakeClient:
     def _connect_and_run(self) -> None:
         _LOGGER.info("Connecting to Wyoming wake word service at %s:%d", self._host, self._port)
         with socket.create_connection((self._host, self._port), timeout=10.0) as sock:
-            sock.settimeout(0.05)  # short recv timeout so we can keep sending audio
             _LOGGER.info("Connected to Wyoming wake word service")
+
+            # Wyoming handshake: the server sends an 'info' event first.
+            # Read it before sending run-detection, otherwise the service
+            # rejects run-detection as "Unexpected event".
+            sock.settimeout(10.0)
+            recv_buf = b""
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    raise ConnectionError("Wyoming service closed connection during handshake")
+                recv_buf += data
+                newline_pos = recv_buf.find(b"\n")
+                if newline_pos >= 0:
+                    line = recv_buf[:newline_pos]
+                    recv_buf = recv_buf[newline_pos + 1:]
+                    try:
+                        event = json.loads(line)
+                        _LOGGER.debug("Wyoming handshake event: %s", event.get("type"))
+                        # skip binary payload if any
+                        data_length = event.get("data_length", 0)
+                        if data_length > 0 and len(recv_buf) >= data_length:
+                            recv_buf = recv_buf[data_length:]
+                    except json.JSONDecodeError:
+                        pass
+                    break  # consumed one event; proceed
+
+            sock.settimeout(0.05)  # short recv timeout so we can keep sending audio
 
             # Ask the service to start detection for the requested wake words
             self._send_event(sock, {"type": "run-detection", "data": {"names": self._wake_word_names}})

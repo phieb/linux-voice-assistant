@@ -77,8 +77,19 @@ class VoiceSatelliteProtocol(APIServer):
         super().__init__(state.name)
 
         self.state = state
-        self.state.satellite = self
         self.state.connected = False
+        # Initialize before setting state.satellite so audio thread can't call
+        # handle_audio() before these attributes exist.
+        self._is_streaming_audio = False
+        self._tts_url: Optional[str] = None
+        self._tts_played = False
+        self._continue_conversation = False
+        self._timer_finished = False
+        self._processing = False
+        self._pipeline_active = False
+        self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
+        self._disconnect_event = asyncio.Event()
+        self.state.satellite = self
 
         existing_media_players = [entity for entity in self.state.entities if isinstance(entity, MediaPlayerEntity)]
         if existing_media_players:
@@ -165,16 +176,6 @@ class VoiceSatelliteProtocol(APIServer):
         thinking_sound_switch.update_set_thinking_sound_enabled(self._set_thinking_sound_enabled)
         thinking_sound_switch.sync_with_state()
 
-        self._is_streaming_audio = False
-        self._tts_url: Optional[str] = None
-        self._tts_played = False
-        self._continue_conversation = False
-        self._timer_finished = False
-        self._processing = False
-        self._pipeline_active = False
-        self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
-        self._disconnect_event = asyncio.Event()
-        
         if self.state.external_wake_word_enabled:
             _LOGGER.info("External wake word detection mode active - continuous audio streaming enabled")
 
