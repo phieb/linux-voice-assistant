@@ -89,10 +89,13 @@ class WyomingWakeClient:
         with socket.create_connection((self._host, self._port), timeout=10.0) as sock:
             _LOGGER.info("Connected to Wyoming wake word service")
 
-            # Wyoming handshake: the server sends an 'info' event first.
-            # Read it before sending run-detection, otherwise the service
-            # rejects run-detection as "Unexpected event".
+            # Wyoming handshake:
+            #   1. Client → describe
+            #   2. Server → info
+            #   3. Client → run-detection
             sock.settimeout(10.0)
+            self._send_event(sock, {"type": "describe"})
+
             recv_buf = b""
             while True:
                 data = sock.recv(4096)
@@ -106,13 +109,13 @@ class WyomingWakeClient:
                     try:
                         event = json.loads(line)
                         _LOGGER.debug("Wyoming handshake event: %s", event.get("type"))
-                        # skip binary payload if any
+                        # skip binary payload of info if any
                         data_length = event.get("data_length", 0)
                         if data_length > 0 and len(recv_buf) >= data_length:
                             recv_buf = recv_buf[data_length:]
                     except json.JSONDecodeError:
                         pass
-                    break  # consumed one event; proceed
+                    break  # consumed info; proceed
 
             sock.settimeout(0.05)  # short recv timeout so we can keep sending audio
 
